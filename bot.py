@@ -3,6 +3,7 @@ import logging
 import sqlite3
 import random
 import os
+from aiohttp import web
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -2050,8 +2051,21 @@ async def admin_stats2(message: Message):
     except: pass
     await show_stats2(message)
 
+async def handle(request):
+    return web.Response(text="Bot is running")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
 async def main():
     print("Бот запущен...")
+    await start_web_server()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
