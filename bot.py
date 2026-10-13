@@ -1542,3 +1542,522 @@ async def buy_koch_service(callback: CallbackQuery):
         try:
             await bot.send_message(seller[1], f"🥔 Купили коч-анкету #{sid}!\n+{s[5]} 🥔")
         except: pass
+
+# ===== ЧАТ =====
+@dp.callback_query(F.data.startswith("chat_"))
+async def chat_open(callback: CallbackQuery, state: FSMContext):
+    order_id = int(callback.data.split("_")[1])
+    acc = get_account(callback.from_user.id)
+    order = get_order(order_id)
+    if not order:
+        await callback.answer("Не найден.", show_alert=True); return
+    if acc[0] != order[1] and acc[0] != order[2]:
+        await callback.answer("Не участник.", show_alert=True); return
+    other_id = order[2] if acc[0] == order[1] else order[1]
+    other = get_account_by_id(other_id)
+    await state.update_data(chat_order_id=order_id, chat_other_id=other_id)
+    await callback.message.answer(
+        f"💬 Чат по заказу #{order_id}\n"
+        f"Собеседник: {other[2] if other else '?'}\n\n"
+        f"Пиши текст или фото.\nВыйти: /endchat",
+        reply_markup=cancel_kb
+    )
+    await state.set_state(ChatForm.message)
+    await callback.answer()
+
+@dp.message(ChatForm.message, F.text == "❌ Отмена")
+async def chat_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Чат закрыт.", reply_markup=main_kb)
+
+@dp.message(ChatForm.message, F.text == "/endchat")
+async def chat_end(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Чат закрыт.", reply_markup=main_kb)
+
+@dp.message(ChatForm.message, F.text)
+async def chat_send_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    order_id = data.get("chat_order_id")
+    other_id = data.get("chat_other_id")
+    if not order_id or not other_id:
+        await state.clear()
+        await message.answer("Чат закрыт.", reply_markup=main_kb)
+        return
+    acc = get_account(message.from_user.id)
+    other = get_account_by_id(other_id)
+    if not other:
+        return
+    save_chat_message(order_id, acc[0], other_id, "text", message.text)
+    try:
+        await bot.send_message(other[1], f"💬 Заказ #{order_id}\nОт: {acc[2]}\n\n{message.text}")
+    except: pass
+    try: await message.delete()
+    except: pass
+    await message.answer("✅ Отправлено.")
+
+@dp.message(ChatForm.message, F.photo)
+async def chat_send_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    order_id = data.get("chat_order_id")
+    other_id = data.get("chat_other_id")
+    if not order_id or not other_id:
+        await state.clear()
+        await message.answer("Чат закрыт.", reply_markup=main_kb)
+        return
+    acc = get_account(message.from_user.id)
+    other = get_account_by_id(other_id)
+    if not other:
+        return
+    photo_id = message.photo[-1].file_id
+    caption = message.caption or ""
+    save_chat_message(order_id, acc[0], other_id, "photo", caption, photo_id)
+    try:
+        await bot.send_photo(other[1], photo=photo_id, caption=f"💬 Заказ #{order_id}\nОт: {acc[2]}\n{caption}")
+    except: pass
+    try: await message.delete()
+    except: pass
+    await message.answer("✅ Фото отправлено.")
+
+# ===== ОТЗЫВЫ =====
+@dp.callback_query(F.data.startswith("review_"))
+async def review_start(callback: CallbackQuery, state: FSMContext):
+    order_id = int(callback.data.split("_")[1])
+    acc = get_account(callback.from_user.id)
+    order = get_order(order_id)
+    if not order or order[1] != acc[0]:
+        await callback.answer("Не твой.", show_alert=True); return
+    if order[9] != "done":
+        await callback.answer("Не завершён.", show_alert=True); return
+    await state.update_data(review_order_id=order_id, review_executor_id=order[2])
+    kb = ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="1⭐"), KeyboardButton(text="2⭐"), KeyboardButton(text="3⭐")],
+        [KeyboardButton(text="4⭐"), KeyboardButton(text="5⭐")],
+        [KeyboardButton(text="❌ Отмена")]
+    ], resize_keyboard=True)
+    await callback.message.answer(f"⭐ Оцени исполнителя за заказ #{order_id}:", reply_markup=kb)
+    await state.set_state(ReviewForm.rating)
+    await callback.answer()
+
+@dp.message(ReviewForm.rating, F.text)
+async def review_rating(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=main_kb)
+        return
+    if message.text not in ["1⭐", "2⭐", "3⭐", "4⭐", "5⭐"]:
+        await message.answer("1⭐-5⭐"); return
+    await state.update_data(review_rating=int(message.text[0]))
+    try: await message.delete()
+    except: pass
+    await message.answer("📝 Текст отзыва:", reply_markup=cancel_kb)
+    await state.set_state(ReviewForm.text)
+
+@dp.message(ReviewForm.text, F.text)
+async def review_text(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=main_kb)
+        return
+    data = await state.get_data()
+    acc = get_account(message.from_user.id)
+    add_review(data["review_order_id"], acc[0], data["review_executor_id"], data["review_rating"], message.text)
+    try: await message.delete()
+    except: pass
+    executor = get_account_by_id(data["review_executor_id"])
+    if executor:
+        try:
+            await bot.send_message(executor[1], f"⭐ Новый отзыв за заказ #{data['review_order_id']}!\n{data['review_rating']}/5\n{message.text}")
+        except: pass
+    await state.clear()
+    await message.answer(f"✅ Отзыв сохранён! {data['review_rating']}⭐", reply_markup=main_kb)
+
+# ===== СПОРЫ =====
+@dp.callback_query(F.data.startswith("dispute_"))
+async def dispute_start(callback: CallbackQuery, state: FSMContext):
+    order_id = int(callback.data.split("_")[1])
+    acc = get_account(callback.from_user.id)
+    order = get_order(order_id)
+    if not order:
+        await callback.answer("Не найден.", show_alert=True); return
+    if acc[0] != order[1] and acc[0] != order[2]:
+        await callback.answer("Не участник.", show_alert=True); return
+    await state.update_data(dispute_order_id=order_id)
+    await callback.message.answer(f"⚖️ Спор по заказу #{order_id}\n\nОпиши проблему:", reply_markup=cancel_kb)
+    await state.set_state(DisputeForm.reason)
+    await callback.answer()
+
+@dp.message(DisputeForm.reason, F.text)
+async def dispute_reason(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=main_kb)
+        return
+    data = await state.get_data()
+    acc = get_account(message.from_user.id)
+    order_id = data["dispute_order_id"]
+    order = get_order(order_id)
+    dispute_id = create_dispute(order_id, acc[0], message.text)
+    try: await message.delete()
+    except: pass
+    await state.clear()
+    await message.answer("✅ Спор отправлен.", reply_markup=main_kb)
+    try:
+        customer = get_account_by_id(order[1])
+        executor = get_account_by_id(order[2]) if order[2] else None
+        await bot.send_message(
+            ADMIN_ID,
+            f"⚖️ Спор #{dispute_id}\n"
+            f"Заказ #{order_id}: {order[3]}\n"
+            f"Сумма: {order[6]} 💰\n"
+            f"Заказчик: {customer[2] if customer else '?'}\n"
+            f"Исполнитель: {executor[2] if executor else 'нет'}\n\n"
+            f"От {acc[2]}: {message.text}\n\n"
+            f"/resolve {dispute_id} refund|payout|split"
+        )
+    except: pass
+
+# ===== АДМИНКА =====
+@dp.message(Command("admin"))
+async def admin_panel(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    await message.answer(
+        "Панель:\n\n"
+        "📰 /news — новость\n/delnews ID\n\n"
+        "💰 /give_gold НИК СУММА\n/give_koch НИК СУММА\n/self_gold СУММА\n/self_koch СУММА\n\n"
+        "🚫 /ban НИК\n/unban НИК\n\n"
+        "💸 /withdraws\n/approve_withdraw ID\n/reject_withdraw ID\n\n"
+        "⚖️ /disputes\n/resolve ID refund|payout|split\n\n"
+        "💬 /chatlog ORDER_ID\n\n"
+        "📊 /stats2"
+    )
+
+@dp.message(Command("news"))
+async def news_start(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    await message.answer("📰 Заголовок:", reply_markup=cancel_kb)
+    await state.set_state(NewsForm.title)
+
+@dp.message(NewsForm.title, F.text)
+async def news_title(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=main_kb)
+        return
+    await state.update_data(title=message.text)
+    try: await message.delete()
+    except: pass
+    await message.answer("📝 Текст новости:")
+    await state.set_state(NewsForm.text)
+
+@dp.message(NewsForm.text, F.text)
+async def news_text(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=main_kb)
+        return
+    data = await state.get_data()
+    news_id = create_news(message.from_user.id, data["title"], message.text)
+    try: await message.delete()
+    except: pass
+    await state.clear()
+    await message.answer(f"✅ Новость #{news_id}!", reply_markup=main_kb)
+
+@dp.message(Command("delnews"))
+async def del_news(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Формат: /delnews ID"); return
+    cur.execute("UPDATE news SET status = 'deleted' WHERE id = ?", (int(parts[1]),))
+    conn.commit()
+    await message.answer(f"🗑 #{parts[1]} удалена.")
+
+@dp.message(Command("give_gold"))
+async def admin_give_gold(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("Формат: /give_gold НИК СУММА"); return
+    acc = get_account_by_nick(parts[1])
+    if not acc:
+        await message.answer("Нет ника."); return
+    if not parts[2].isdigit():
+        await message.answer("Сумма — число."); return
+    add_gold(acc[0], int(parts[2]), "Начисление")
+    await message.answer(f"✅ {parts[1]}: +{parts[2]} 💰")
+
+@dp.message(Command("give_koch"))
+async def admin_give_koch(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("Формат: /give_koch НИК СУММА"); return
+    acc = get_account_by_nick(parts[1])
+    if not acc:
+        await message.answer("Нет ника."); return
+    if not parts[2].isdigit():
+        await message.answer("Сумма — число."); return
+    add_koch(acc[0], int(parts[2]), "Начисление")
+    await message.answer(f"✅ {parts[1]}: +{parts[2]} 🥔")
+
+@dp.message(Command("self_gold"))
+async def admin_self_gold(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Формат: /self_gold СУММА"); return
+    acc = get_account(message.from_user.id)
+    add_gold(acc[0], int(parts[1]), "Пополнение")
+    await message.answer(f"✅ +{parts[1]} 💰")
+
+@dp.message(Command("self_koch"))
+async def admin_self_koch(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Формат: /self_koch СУММА"); return
+    acc = get_account(message.from_user.id)
+    add_koch(acc[0], int(parts[1]), "Пополнение")
+    await message.answer(f"✅ +{parts[1]} 🥔")
+
+@dp.message(Command("ban"))
+async def admin_ban(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Формат: /ban НИК"); return
+    acc = get_account_by_nick(parts[1])
+    if not acc:
+        await message.answer("Нет ника."); return
+    cur.execute("UPDATE accounts SET is_banned = 1 WHERE id = ?", (acc[0],))
+    conn.commit()
+    await message.answer(f"✅ {parts[1]} забанен.")
+
+@dp.message(Command("unban"))
+async def admin_unban(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Формат: /unban НИК"); return
+    acc = get_account_by_nick(parts[1])
+    if not acc:
+        await message.answer("Нет ника."); return
+    cur.execute("UPDATE accounts SET is_banned = 0 WHERE id = ?", (acc[0],))
+    conn.commit()
+    await message.answer(f"✅ {parts[1]} разбанен.")
+
+@dp.message(Command("withdraws"))
+async def admin_withdraws(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    cur.execute("SELECT * FROM withdraw_requests WHERE status = 'pending' ORDER BY id DESC")
+    reqs = cur.fetchall()
+    if not reqs:
+        await message.answer("Заявок нет."); return
+    for r in reqs:
+        acc = get_account_by_id(r[1])
+        await message.answer(
+            f"💸 Заявка #{r[0]}\nЮзер: {acc[2] if acc else '?'}\n"
+            f"Голда: {r[2]} 💰\nЗвёзды: {r[3]} ⭐\n\n"
+            f"/approve_withdraw {r[0]}\n/reject_withdraw {r[0]}"
+        )
+
+@dp.message(Command("approve_withdraw"))
+async def admin_approve_withdraw(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Формат: /approve_withdraw ID"); return
+    req_id = int(parts[1])
+    cur.execute("SELECT * FROM withdraw_requests WHERE id = ?", (req_id,))
+    r = cur.fetchone()
+    if not r or r[4] != "pending":
+        await message.answer("Не найдена."); return
+    cur.execute("UPDATE withdraw_requests SET status = 'approved' WHERE id = ?", (req_id,))
+    conn.commit()
+    acc = get_account_by_id(r[1])
+    await message.answer(f"✅ #{req_id} одобрена. Отправь {r[3]} ⭐ вручную!")
+    if acc:
+        try:
+            await bot.send_message(acc[1], f"✅ Заявка #{req_id} одобрена! Админ отправит {r[3]} ⭐.")
+        except: pass
+
+@dp.message(Command("reject_withdraw"))
+async def admin_reject_withdraw(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Формат: /reject_withdraw ID"); return
+    req_id = int(parts[1])
+    cur.execute("SELECT * FROM withdraw_requests WHERE id = ?", (req_id,))
+    r = cur.fetchone()
+    if not r or r[4] != "pending":
+        await message.answer("Не найдена."); return
+    cur.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", (r[2], r[1]))
+    conn.commit()
+    log_tx(r[1], "withdraw_refund", r[2], None, f"Заявка #{req_id} отклонена")
+    cur.execute("UPDATE withdraw_requests SET status = 'rejected' WHERE id = ?", (req_id,))
+    conn.commit()
+    acc = get_account_by_id(r[1])
+    await message.answer(f"❌ #{req_id} отклонена. Голда возвращена.")
+    if acc:
+        try:
+            await bot.send_message(acc[1], f"❌ Заявка #{req_id} отклонена. {r[2]} 💰 возвращено.")
+        except: pass
+
+@dp.message(Command("chatlog"))
+async def admin_chatlog(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Формат: /chatlog ORDER_ID"); return
+    order_id = int(parts[1])
+    order = get_order(order_id)
+    if not order:
+        await message.answer("Заказ не найден."); return
+    msgs = get_chat_history(order_id)
+    if not msgs:
+        await message.answer(f"Переписки нет."); return
+    text = f"💬 Переписка по заказу #{order_id}\n📌 {order[3]}\n\n"
+    for m in msgs:
+        sender = get_account_by_id(m[2])
+        content = m[5] if m[5] else f"[{m[4]}]"
+        text += f"[{m[7][:16]}] {sender[2] if sender else '?'}: {content}\n"
+        if len(text) > 3500:
+            await message.answer(text)
+            text = ""
+    if text:
+        await message.answer(text)
+
+@dp.message(Command("disputes"))
+async def admin_disputes(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    cur.execute("SELECT * FROM disputes WHERE status = 'open' ORDER BY id DESC")
+    disputes = cur.fetchall()
+    if not disputes:
+        await message.answer("Споров нет."); return
+    for d in disputes:
+        order = get_order(d[1])
+        author = get_account_by_id(d[2])
+        await message.answer(
+            f"⚖️ Спор #{d[0]}\nЗаказ #{d[1]}: {order[3] if order else '?'}\n"
+            f"Сумма: {order[6] if order else '?'} 💰\n"
+            f"Автор: {author[2] if author else '?'}\nПричина: {d[3]}\n\n"
+            f"/resolve {d[0]} refund|payout|split"
+        )
+
+@dp.message(Command("resolve"))
+async def admin_resolve(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    parts = message.text.split()
+    if len(parts) != 3 or parts[2] not in ("refund", "payout", "split"):
+        await message.answer("Формат: /resolve ID refund|payout|split"); return
+    if not parts[1].isdigit():
+        await message.answer("ID — число."); return
+    dispute_id = int(parts[1])
+    action = parts[2]
+    cur.execute("SELECT * FROM disputes WHERE id = ?", (dispute_id,))
+    dispute = cur.fetchone()
+    if not dispute:
+        await message.answer("Не найден."); return
+    order_id = dispute[1]
+    order = get_order(order_id)
+    if not order:
+        await message.answer("Заказ не найден."); return
+    amount = order[6]
+    if action == "refund":
+        unfreeze_to_customer(order[1], amount, order_id, "Спор: возврат")
+    elif action == "payout":
+        unfreeze_to_executor(order[1], order[2], amount, order_id)
+    elif action == "split":
+        half = amount // 2
+        cur.execute("UPDATE accounts SET frozen = frozen - ? WHERE id = ?", (amount, order[1]))
+        cur.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", (half, order[1]))
+        cur.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", (int(half * 0.85), order[2]))
+        conn.commit()
+        log_tx(order[1], "dispute_refund", half, order_id, "Спор: 50/50")
+    cur.execute("UPDATE orders SET status = 'done' WHERE id = ?", (order_id,))
+    cur.execute("UPDATE disputes SET status = 'closed' WHERE id = ?", (dispute_id,))
+    conn.commit()
+    await message.answer(f"✅ Спор #{dispute_id}: {action}")
+
+async def show_stats2(message: Message):
+    cur.execute("SELECT COUNT(*) FROM accounts"); users = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM orders"); orders = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM orders WHERE status = 'done'"); done = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM services WHERE status = 'active'"); services = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM disputes WHERE status = 'open'"); disp = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM withdraw_requests WHERE status = 'pending'"); wd = cur.fetchone()[0]
+    cur.execute("SELECT SUM(balance) FROM accounts"); gold = cur.fetchone()[0] or 0
+    cur.execute("SELECT SUM(koch) FROM accounts"); koch = cur.fetchone()[0] or 0
+    text = (
+        f"📊 СТАТИСТИКА 2.0 (админ)\n\n"
+        f"👥 Юзеров: {users}\n"
+        f"📦 Заказов: {orders} (✅ {done})\n"
+        f"🏪 Услуг: {services}\n"
+        f"⚖️ Споров: {disp}\n"
+        f"💸 Заявок на вывод: {wd}\n"
+        f"💰 Голды: {gold}\n"
+        f"🥔 Коч-коинов: {koch}\n\n"
+        f"👤 Все юзеры:\n"
+    )
+    cur.execute("SELECT nickname, tg_id, balance, koch, rating FROM accounts ORDER BY id ASC")
+    all_users = cur.fetchall()
+    for u in all_users:
+        try:
+            chat = await bot.get_chat(u[1])
+            uname = f"@{chat.username}" if chat.username else f"ID:{u[1]}"
+        except:
+            uname = f"ID:{u[1]}"
+        text += f"\n{u[0]} → {uname} | 💰 {u[2]} | 🥔 {u[3]} | ⭐ {u[4] or 0}"
+        if len(text) > 3500:
+            await message.answer(text)
+            text = ""
+    if text:
+        await message.answer(text)
+
+@dp.message(Command("stats2"))
+async def admin_stats2(message: Message):
+    if not is_admin(message.from_user.id): return
+    try: await message.delete()
+    except: pass
+    await show_stats2(message)
+
+async def main():
+    print("Бот запущен...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
